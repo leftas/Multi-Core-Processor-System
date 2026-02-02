@@ -1,0 +1,4 @@
+*.bin
+.clang/
+.cache/
+compile_commands.json
