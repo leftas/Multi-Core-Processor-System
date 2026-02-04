@@ -42,7 +42,7 @@ LIBS            = -lsystemc -pthread
 LIBDIR          = -L$(SYSTEMC_LIBDIR)
 
 # debug configuration
-#CFLAGS          = -Wall -g3 -O0 -std=c++17 -fsanitize=address
+CFLAGS          = -Wall -g3 -O0 -std=c++17
 #LIBS            = -lsystemc -pthread -fsanitize=address
 
 # Find all targets

@@ -11,15 +11,26 @@
  */
 
 #include <iostream>
-#include <iomanip>
+#include <optional>
 #include <systemc>
+#include <cmath>
+#include <array>
 
 #include "psa.h"
 
 using namespace std;
 using namespace sc_core; // This pollutes namespace, better: only import what you need.
+using ADDRESS_UNIT = uint64_t;
 
-static const size_t MEM_SIZE = 2500;
+static constexpr size_t MEM_SIZE = 2500;
+static constexpr size_t CACHE_SIZE = 32 * 1024;
+static constexpr size_t CACHE_LINE_SIZE = 32;
+static constexpr size_t CACHE_WAYS = 8;
+static constexpr size_t CACHE_SETS = CACHE_SIZE / (CACHE_LINE_SIZE * CACHE_WAYS);
+
+static constexpr size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT));
+static constexpr size_t INDEX_BITS = std::log2(CACHE_SETS);
+
 
 SC_MODULE(Memory) {
     public:
@@ -29,41 +40,32 @@ SC_MODULE(Memory) {
 
     sc_in<bool> Port_CLK;
     sc_in<Function> Port_Func;
-    sc_in<uint64_t> Port_Addr;
+    sc_in<ADDRESS_UNIT> Port_Addr;
     sc_out<RetCode> Port_Done;
-    sc_inout_rv<64> Port_Data;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_Data;
 
     SC_CTOR(Memory) {
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
         dont_initialize();
 
-        m_data = new uint64_t[MEM_SIZE];
+        m_data = new ADDRESS_UNIT[MEM_SIZE];
     }
 
     ~Memory() {
         delete[] m_data;
     }
 
-    void dump() {
-        for (size_t i = 0; i < MEM_SIZE; i++) {
-            cout << setw(5) << i << ": " << setw(5) << m_data[i];
-            if (i % 8 == 7) {
-                cout << endl;
-            }
-        }
-    }
-
     private:
-    uint64_t *m_data;
+    ADDRESS_UNIT *m_data;
 
     void execute() {
         while (true) {
             wait(Port_Func.value_changed_event());
 
             Function f = Port_Func.read();
-            uint64_t addr = Port_Addr.read();
-            uint64_t data = 0;
+            ADDRESS_UNIT addr = Port_Addr.read();
+            ADDRESS_UNIT data = 0;
             if (f == FUNC_WRITE) {
                 data = Port_Data.read().to_uint64();
                 log(name(), "received write on address", addr, "with data", data);
@@ -89,13 +91,141 @@ SC_MODULE(Memory) {
     }
 };
 
+struct Cacheline {
+    size_t tag = 0;
+    bool valid = false;
+    array<ADDRESS_UNIT, CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)> data {};
+};
+
+SC_MODULE(Cache) {
+    public:
+    sc_in<bool> Port_CLK;
+
+    sc_in<Memory::Function> Port_Func;
+    sc_out<Memory::RetCode> Port_Done;
+
+    sc_in<ADDRESS_UNIT> Port_Addr;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_Data;
+
+    sc_out<Memory::Function> Port_MemFunc;
+    sc_in<Memory::RetCode> Port_MemDone;
+
+    sc_out<ADDRESS_UNIT> Port_MemAddr;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_MemData;
+
+    SC_CTOR(Cache) {
+        SC_THREAD(execute);
+        sensitive << Port_CLK.pos();
+        dont_initialize();
+
+    }
+
+private:
+    array<array<Cacheline, CACHE_WAYS>, CACHE_SETS> m_cache;
+
+    void write_out_read(ADDRESS_UNIT data)
+    {
+        Port_Data.write(data);
+        Port_Done.write(Memory::RET_READ_DONE);
+        wait();
+        Port_Data.write(float_64_bit_wire); // string with 64 "Z"'s
+    }
+
+    void execute() 
+    {
+        while (true) {
+            wait(Port_Func.value_changed_event());
+
+            Memory::Function f = Port_Func.read();
+            ADDRESS_UNIT addr = Port_Addr.read();
+            std::optional<ADDRESS_UNIT> result; // result will be gone if we not gonna take it instantly.
+
+            if (f == Memory::FUNC_WRITE)
+                result = Port_Data.read().to_uint64();
+
+            size_t offset = addr & ((1 << OFFSET_BITS) - 1); // offset bitmask -> indicates which offset in cacheline we select.
+            size_t index  = (addr >> OFFSET_BITS) & ((1 << INDEX_BITS) - 1); // index bitmask -> indicates which cache set we select.
+            size_t tag    = addr >> (OFFSET_BITS + INDEX_BITS); // leftovers for tag -> matching the cacheline itself!
+
+            auto& current_set = m_cache[index];
+
+            if (f == Memory::FUNC_READ)
+                log(name(), "read address =", addr);
+            if (f == Memory::FUNC_WRITE)
+                log(name(), "write address =", addr);
+
+            wait(1);
+
+            if (addr >= MEM_SIZE) {
+                if (f == Memory::FUNC_READ)
+                    write_out_read(0);
+                continue;
+            }
+
+            bool found = false;
+
+            for (Cacheline& way : current_set) {
+                if (way.valid && way.tag == tag) {
+                    // fast path
+                    if (f == Memory::FUNC_READ) {
+                        log(name(), "read hit address =", addr, "set =", index, "line =", offset);
+                        write_out_read(way.data[offset / sizeof(ADDRESS_UNIT)]);
+                    }
+                    if (f == Memory::FUNC_WRITE) {
+                        log(name(), "write hit address =", addr, "set =", index, "line =", offset);
+                        way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
+                        Port_Done.write(Memory::RET_WRITE_DONE);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+
+            if (found)
+                continue;
+
+            // Taking a slow path. Accessing memory
+
+            Port_MemAddr.write(addr);
+            // NOTE: This is not entirely correct. We need to fill the whole cache line here.
+            Port_MemFunc.write(Memory::FUNC_READ);
+            wait(Port_MemDone.value_changed_event());
+
+            if (f == Memory::FUNC_READ)
+                result = Port_MemData.read().to_uint64();
+
+            bool inserted = false;
+
+            for (Cacheline& way : current_set) {
+                if (!way.valid) {
+                    way.tag = tag;
+                    way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
+                    way.valid = true;
+                    inserted = true;
+                    break;
+                }
+            }
+
+            if (!inserted) {
+                // Lack of space in the cacheset.
+                // TODO: LRU :)
+            }
+
+            if (f == Memory::FUNC_READ) 
+                write_out_read(result.value());
+            else
+                Port_Done.write(Memory::RET_WRITE_DONE);
+        }
+    }
+};
+
 SC_MODULE(CPU) {
     public:
     sc_in<bool> Port_CLK;
     sc_in<Memory::RetCode> Port_MemDone;
     sc_out<Memory::Function> Port_MemFunc;
-    sc_out<uint64_t> Port_MemAddr;
-    sc_inout_rv<64> Port_MemData;
+    sc_out<ADDRESS_UNIT> Port_MemAddr;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_MemData;
 
     SC_CTOR(CPU) {
         SC_THREAD(execute);
@@ -151,7 +281,7 @@ SC_MODULE(CPU) {
 
                 if (f == Memory::FUNC_WRITE) {
                     // No data in trace, use address * 10 as data value.
-                    uint64_t data = tr_data.addr * 10;
+                    ADDRESS_UNIT data = tr_data.addr * 10;
                     log(name(), "write value", data,
                             "to address", tr_data.addr);
                     Port_MemData.write(data);
@@ -186,6 +316,7 @@ int sc_main(int argc, char *argv[]) {
     sc_report_handler::set_verbosity_level(SC_MEDIUM);
     // Uncomment the next line to silence the log() messages.
     // sc_report_handler::set_verbosity_level(SC_LOW);
+    sc_report_handler::set_actions(SC_ID_VECTOR_CONTAINS_LOGIC_VALUE_, SC_ABORT);
 
     try {
         // Get the tracefile argument and create Tracefile object
@@ -198,21 +329,38 @@ int sc_main(int argc, char *argv[]) {
         // Instantiate Modules
         Memory mem("memory");
         CPU cpu("cpu");
+        Cache cache("cache");
 
         // Signals
         sc_buffer<Memory::Function> sigMemFunc;
         sc_buffer<Memory::RetCode> sigMemDone;
-        sc_signal<uint64_t> sigMemAddr;
-        sc_signal_rv<64> sigMemData;
+        sc_signal<ADDRESS_UNIT> sigMemAddr;
+        sc_signal_rv<sizeof(ADDRESS_UNIT) * 8> sigMemData;
+
+        sc_buffer<Memory::Function> sigCacheFunc;
+        sc_buffer<Memory::RetCode> sigCacheDone;
+        sc_signal<ADDRESS_UNIT> sigCacheAddr;
+        sc_signal_rv<sizeof(ADDRESS_UNIT) * 8> sigCacheData;
 
         // The clock that will drive the CPU and Memory
         sc_clock clk;
 
         // Connecting module ports with signals
-        mem.Port_Func(sigMemFunc);
-        mem.Port_Addr(sigMemAddr);
-        mem.Port_Data(sigMemData);
-        mem.Port_Done(sigMemDone);
+
+        cache.Port_MemFunc(sigCacheFunc);
+        cache.Port_MemAddr(sigCacheAddr);
+        cache.Port_MemData(sigCacheData);
+        cache.Port_MemDone(sigCacheDone);
+
+        mem.Port_Func(sigCacheFunc);
+        mem.Port_Addr(sigCacheAddr);
+        mem.Port_Data(sigCacheData);
+        mem.Port_Done(sigCacheDone);
+
+        cache.Port_Func(sigMemFunc);
+        cache.Port_Addr(sigMemAddr);
+        cache.Port_Data(sigMemData);
+        cache.Port_Done(sigMemDone);
 
         cpu.Port_MemFunc(sigMemFunc);
         cpu.Port_MemAddr(sigMemAddr);
@@ -221,6 +369,7 @@ int sc_main(int argc, char *argv[]) {
 
         mem.Port_CLK(clk);
         cpu.Port_CLK(clk);
+        cache.Port_CLK(clk);
 
         cout << "Running (press CTRL+C to interrupt)... " << endl;
 
