@@ -11,7 +11,7 @@
  */
 
 #include <iostream>
-#include <iomanip>
+#include <optional>
 #include <systemc>
 
 #include "psa.h"
@@ -120,9 +120,99 @@ SC_MODULE(Cache) {
 
 private:
     array<array<Cacheline, CACHE_WAYS>, CACHE_SETS> m_cache;
+
+    void write_out_read(ADDRESS_UNIT data)
+    {
+        Port_Data.write(data);
+        Port_Done.write(Memory::RET_READ_DONE);
+        wait();
+        Port_Data.write(float_64_bit_wire); // string with 64 "Z"'s
+    }
+
     void execute() 
     {
         while (true) {
+            wait(Port_Func.value_changed_event());
+
+            Memory::Function f = Port_Func.read();
+            ADDRESS_UNIT addr = Port_Addr.read();
+            std::optional<ADDRESS_UNIT> result; // result will be gone if we not gonna take it instantly.
+
+            if (f == Memory::FUNC_WRITE)
+                result = Port_Data.read().to_uint64();
+
+            size_t offset = addr & ((1 << OFFSET_BITS) - 1); // offset bitmask -> indicates which offset in cachline we select.
+            size_t index  = (addr >> OFFSET_BITS) & ((1 << INDEX_BITS) - 1); // index bitmask -> indicates which cache set we select.
+            size_t tag    = addr >> (OFFSET_BITS + INDEX_BITS); // leftovers for tag -> matching the cachline itself!
+
+            auto& current_set = m_cache[index];
+
+            if (f == Memory::FUNC_READ)
+                log(name(), "read address =", addr);
+            if (f == Memory::FUNC_WRITE)
+                log(name(), "write address =", addr);
+
+            wait(1);
+
+            if (addr >= MEM_SIZE) {
+                if (f == Memory::FUNC_READ)
+                    write_out_read(0);
+                continue;
+            }
+
+            bool found = false;
+
+            for (Cacheline& way : current_set) {
+                if (way.valid && way.tag == tag) {
+                    // fast path
+                    if (f == Memory::FUNC_READ) {
+                        log(name(), "read hit address =", addr, "set =", index, "line =", offset);
+                        write_out_read(way.data[offset / sizeof(ADDRESS_UNIT)]);
+                    }
+                    if (f == Memory::FUNC_WRITE) {
+                        log(name(), "write hit address =", addr, "set =", index, "line =", offset);
+                        way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
+                        Port_Done.write(Memory::RET_WRITE_DONE);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+
+            if (found)
+                continue;
+
+            // Taking a slow path. Accessing memory
+
+            Port_MemAddr.write(addr);
+            // NOTE: This is not entirely correct. We need to fill the whole cache line here.
+            Port_MemFunc.write(Memory::FUNC_READ);
+            wait(Port_MemDone.value_changed_event());
+
+            if (f == Memory::FUNC_READ)
+                result = Port_MemData.read().to_uint64();
+
+            bool inserted = false;
+
+            for (Cacheline& way : current_set) {
+                if (!way.valid) {
+                    way.tag = tag;
+                    way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
+                    way.valid = true;
+                    inserted = true;
+                    break;
+                }
+            }
+
+            if (!inserted) {
+                // Lack of space in the cacheset.
+                // TODO: LRU :)
+            }
+
+            if (f == Memory::FUNC_READ) 
+                write_out_read(result.value());
+            else
+                Port_Done.write(Memory::RET_WRITE_DONE);
         }
     }
 };
