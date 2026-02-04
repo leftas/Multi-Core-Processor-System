@@ -54,15 +54,6 @@ SC_MODULE(Memory) {
         delete[] m_data;
     }
 
-    void dump() {
-        for (size_t i = 0; i < MEM_SIZE; i++) {
-            cout << setw(5) << i << ": " << setw(5) << m_data[i];
-            if (i % 8 == 7) {
-                cout << endl;
-            }
-        }
-    }
-
     private:
     ADDRESS_UNIT *m_data;
 
