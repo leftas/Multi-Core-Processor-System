@@ -13,6 +13,7 @@
 #include <iostream>
 #include <optional>
 #include <systemc>
+#include <cmath>
 
 #include "psa.h"
 
@@ -26,8 +27,8 @@ static constexpr size_t CACHE_LINE_SIZE = 32;
 static constexpr size_t CACHE_WAYS = 8;
 static constexpr size_t CACHE_SETS = CACHE_SIZE / (CACHE_LINE_SIZE * CACHE_WAYS);
 
-static size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE);
-static size_t INDEX_BITS = std::log2(CACHE_SETS);
+static constexpr size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE);
+static constexpr size_t INDEX_BITS = std::log2(CACHE_SETS);
 
 
 SC_MODULE(Memory) {
