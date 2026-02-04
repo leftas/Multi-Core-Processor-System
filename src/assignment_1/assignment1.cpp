@@ -89,6 +89,44 @@ SC_MODULE(Memory) {
     }
 };
 
+struct Cacheline {
+    size_t tag;
+    bool valid = false;
+    array<ADDRESS_UNIT, CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)> data;
+};
+
+SC_MODULE(Cache) {
+    public:
+    sc_in<bool> Port_CLK;
+
+    sc_in<Memory::Function> Port_Func;
+    sc_out<Memory::RetCode> Port_Done;
+
+    sc_in<ADDRESS_UNIT> Port_Addr;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_Data;
+
+    sc_out<Memory::Function> Port_MemFunc;
+    sc_in<Memory::RetCode> Port_MemDone;
+
+    sc_out<ADDRESS_UNIT> Port_MemAddr;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_MemData;
+
+    SC_CTOR(Cache) {
+        SC_THREAD(execute);
+        sensitive << Port_CLK.pos();
+        dont_initialize();
+
+    }
+
+private:
+    array<array<Cacheline, CACHE_WAYS>, CACHE_SETS> m_cache;
+    void execute() 
+    {
+        while (true) {
+        }
+    }
+};
+
 SC_MODULE(CPU) {
     public:
     sc_in<bool> Port_CLK;
@@ -198,21 +236,38 @@ int sc_main(int argc, char *argv[]) {
         // Instantiate Modules
         Memory mem("memory");
         CPU cpu("cpu");
+        Cache cache("cache");
 
         // Signals
         sc_buffer<Memory::Function> sigMemFunc;
         sc_buffer<Memory::RetCode> sigMemDone;
-        sc_signal<uint64_t> sigMemAddr;
-        sc_signal_rv<64> sigMemData;
+        sc_signal<ADDRESS_UNIT> sigMemAddr;
+        sc_signal_rv<sizeof(ADDRESS_UNIT) * 8> sigMemData;
+
+        sc_buffer<Memory::Function> sigCacheFunc;
+        sc_buffer<Memory::RetCode> sigCacheDone;
+        sc_signal<ADDRESS_UNIT> sigCacheAddr;
+        sc_signal_rv<sizeof(ADDRESS_UNIT) * 8> sigCacheData;
 
         // The clock that will drive the CPU and Memory
         sc_clock clk;
 
         // Connecting module ports with signals
-        mem.Port_Func(sigMemFunc);
-        mem.Port_Addr(sigMemAddr);
-        mem.Port_Data(sigMemData);
-        mem.Port_Done(sigMemDone);
+
+        cache.Port_MemFunc(sigCacheFunc);
+        cache.Port_MemAddr(sigCacheAddr);
+        cache.Port_MemData(sigCacheData);
+        cache.Port_MemDone(sigCacheDone);
+
+        mem.Port_Func(sigCacheFunc);
+        mem.Port_Addr(sigCacheAddr);
+        mem.Port_Data(sigCacheData);
+        mem.Port_Done(sigCacheDone);
+
+        cache.Port_Func(sigMemFunc);
+        cache.Port_Addr(sigMemAddr);
+        cache.Port_Data(sigMemData);
+        cache.Port_Done(sigMemDone);
 
         cpu.Port_MemFunc(sigMemFunc);
         cpu.Port_MemAddr(sigMemAddr);
@@ -221,6 +276,7 @@ int sc_main(int argc, char *argv[]) {
 
         mem.Port_CLK(clk);
         cpu.Port_CLK(clk);
+        cache.Port_CLK(clk);
 
         cout << "Running (press CTRL+C to interrupt)... " << endl;
 
