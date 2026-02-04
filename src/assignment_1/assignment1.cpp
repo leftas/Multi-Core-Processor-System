@@ -314,6 +314,7 @@ int sc_main(int argc, char *argv[]) {
     sc_report_handler::set_verbosity_level(SC_MEDIUM);
     // Uncomment the next line to silence the log() messages.
     // sc_report_handler::set_verbosity_level(SC_LOW);
+    sc_report_handler::set_actions(SC_ID_VECTOR_CONTAINS_LOGIC_VALUE_, SC_ABORT);
 
     try {
         // Get the tracefile argument and create Tracefile object
