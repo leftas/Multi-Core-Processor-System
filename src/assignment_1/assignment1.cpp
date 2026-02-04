@@ -14,6 +14,7 @@
 #include <optional>
 #include <systemc>
 #include <cmath>
+#include <array>
 
 #include "psa.h"
 
@@ -27,7 +28,7 @@ static constexpr size_t CACHE_LINE_SIZE = 32;
 static constexpr size_t CACHE_WAYS = 8;
 static constexpr size_t CACHE_SETS = CACHE_SIZE / (CACHE_LINE_SIZE * CACHE_WAYS);
 
-static constexpr size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE);
+static constexpr size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT));
 static constexpr size_t INDEX_BITS = std::log2(CACHE_SETS);
 
 
@@ -91,9 +92,9 @@ SC_MODULE(Memory) {
 };
 
 struct Cacheline {
-    size_t tag;
+    size_t tag = 0;
     bool valid = false;
-    array<ADDRESS_UNIT, CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)> data;
+    array<ADDRESS_UNIT, CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)> data {};
 };
 
 SC_MODULE(Cache) {
@@ -142,9 +143,9 @@ private:
             if (f == Memory::FUNC_WRITE)
                 result = Port_Data.read().to_uint64();
 
-            size_t offset = addr & ((1 << OFFSET_BITS) - 1); // offset bitmask -> indicates which offset in cachline we select.
+            size_t offset = addr & ((1 << OFFSET_BITS) - 1); // offset bitmask -> indicates which offset in cacheline we select.
             size_t index  = (addr >> OFFSET_BITS) & ((1 << INDEX_BITS) - 1); // index bitmask -> indicates which cache set we select.
-            size_t tag    = addr >> (OFFSET_BITS + INDEX_BITS); // leftovers for tag -> matching the cachline itself!
+            size_t tag    = addr >> (OFFSET_BITS + INDEX_BITS); // leftovers for tag -> matching the cacheline itself!
 
             auto& current_set = m_cache[index];
 
@@ -224,7 +225,7 @@ SC_MODULE(CPU) {
     sc_in<Memory::RetCode> Port_MemDone;
     sc_out<Memory::Function> Port_MemFunc;
     sc_out<ADDRESS_UNIT> Port_MemAddr;
-    sc_inout_rv<64> Port_MemData;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_MemData;
 
     SC_CTOR(CPU) {
         SC_THREAD(execute);
