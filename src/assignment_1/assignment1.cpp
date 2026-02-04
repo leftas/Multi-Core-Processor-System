@@ -18,8 +18,17 @@
 
 using namespace std;
 using namespace sc_core; // This pollutes namespace, better: only import what you need.
+using ADDRESS_UNIT = uint64_t;
 
-static const size_t MEM_SIZE = 2500;
+static constexpr size_t MEM_SIZE = 2500;
+static constexpr size_t CACHE_SIZE = 32 * 1024;
+static constexpr size_t CACHE_LINE_SIZE = 32;
+static constexpr size_t CACHE_WAYS = 8;
+static constexpr size_t CACHE_SETS = CACHE_SIZE / (CACHE_LINE_SIZE * CACHE_WAYS);
+
+static size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE);
+static size_t INDEX_BITS = std::log2(CACHE_SETS);
+
 
 SC_MODULE(Memory) {
     public:
@@ -29,16 +38,16 @@ SC_MODULE(Memory) {
 
     sc_in<bool> Port_CLK;
     sc_in<Function> Port_Func;
-    sc_in<uint64_t> Port_Addr;
+    sc_in<ADDRESS_UNIT> Port_Addr;
     sc_out<RetCode> Port_Done;
-    sc_inout_rv<64> Port_Data;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_Data;
 
     SC_CTOR(Memory) {
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
         dont_initialize();
 
-        m_data = new uint64_t[MEM_SIZE];
+        m_data = new ADDRESS_UNIT[MEM_SIZE];
     }
 
     ~Memory() {
@@ -55,15 +64,15 @@ SC_MODULE(Memory) {
     }
 
     private:
-    uint64_t *m_data;
+    ADDRESS_UNIT *m_data;
 
     void execute() {
         while (true) {
             wait(Port_Func.value_changed_event());
 
             Function f = Port_Func.read();
-            uint64_t addr = Port_Addr.read();
-            uint64_t data = 0;
+            ADDRESS_UNIT addr = Port_Addr.read();
+            ADDRESS_UNIT data = 0;
             if (f == FUNC_WRITE) {
                 data = Port_Data.read().to_uint64();
                 log(name(), "received write on address", addr, "with data", data);
@@ -94,7 +103,7 @@ SC_MODULE(CPU) {
     sc_in<bool> Port_CLK;
     sc_in<Memory::RetCode> Port_MemDone;
     sc_out<Memory::Function> Port_MemFunc;
-    sc_out<uint64_t> Port_MemAddr;
+    sc_out<ADDRESS_UNIT> Port_MemAddr;
     sc_inout_rv<64> Port_MemData;
 
     SC_CTOR(CPU) {
@@ -151,7 +160,7 @@ SC_MODULE(CPU) {
 
                 if (f == Memory::FUNC_WRITE) {
                     // No data in trace, use address * 10 as data value.
-                    uint64_t data = tr_data.addr * 10;
+                    ADDRESS_UNIT data = tr_data.addr * 10;
                     log(name(), "write value", data,
                             "to address", tr_data.addr);
                     Port_MemData.write(data);
