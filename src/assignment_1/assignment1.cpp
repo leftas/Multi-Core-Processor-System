@@ -24,7 +24,7 @@ using namespace std;
 using namespace sc_core; // This pollutes namespace, better: only import what you need.
 using ADDRESS_UNIT = uint64_t;
 
-static constexpr size_t MEM_SIZE = 2500;
+static constexpr size_t MEM_SIZE = 8912;
 static constexpr size_t CACHE_SIZE = 32 * 1024;
 static constexpr size_t CACHE_LINE_SIZE = 32;
 static constexpr size_t CACHE_WAYS = 8;
