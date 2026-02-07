@@ -249,7 +249,29 @@ private:
 
             if (!inserted) {
                 // Lack of space in the cacheset.
-                // TODO: LRU :)
+                // Evict the last one.
+                int victim = current_set.evict();
+                Cacheline &victim_line = current_set.lines[victim];
+                if (victim_line.dirty)
+                {
+                    ADDRESS_UNIT victim_line_addr = victim_line.tag << (INDEX_BITS + OFFSET_BITS) | (index << OFFSET_BITS);
+                    log(name(), "evict dirty line address =", victim_line_addr, "set =", index, "line =", victim);
+                    // Write back deadlocks?
+                    Port_MemAddr.write(victim_line_addr);
+                    Port_MemFunc.write(Memory::FUNC_WRITE);
+                    Port_MemData.write(victim_line.data[offset / sizeof(ADDRESS_UNIT)]);
+                    wait(Port_MemDone.value_changed_event());
+                }
+                else
+                {
+                    log(name(), "evict clean line address =", victim_line.tag, "set =", index, "line =", victim);
+                }
+                // Overwrite and put it to the front
+                victim_line.tag = tag;
+                victim_line.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
+                victim_line.valid = true;
+                victim_line.dirty = false;
+                current_set.touch(victim);
             }
 
             if (f == Memory::FUNC_READ) 
