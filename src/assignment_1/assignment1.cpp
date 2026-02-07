@@ -10,12 +10,14 @@
  *
  */
 
+#include <algorithm>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <systemc>
 #include <cmath>
 #include <array>
-
+#include <list>
 #include "psa.h"
 
 using namespace std;
@@ -94,7 +96,39 @@ SC_MODULE(Memory) {
 struct Cacheline {
     size_t tag = 0;
     bool valid = false;
+    bool dirty = false;
     array<ADDRESS_UNIT, CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)> data {};
+};
+
+struct Cacheset {
+    array<Cacheline, CACHE_WAYS> lines;
+    list<int> lru {};
+
+    Cacheset(){
+        lru.clear();
+            for(size_t way =0; way<CACHE_WAYS; ++way){
+                lines[way].valid = false;
+                lines[way].dirty = false;
+                lru.push_back(static_cast<int>(way));
+        }
+    }
+
+    void touch(int way)
+    {
+        if(lru.front() == way)
+            return;
+        auto iter = find(lru.begin(), lru.end(), way);
+        if(iter == lru.end())
+            return;
+        lru.erase(iter);
+        lru.push_front(way);
+    }
+
+    int evict()
+    {
+        return lru.back();
+    }
+
 };
 
 SC_MODULE(Cache) {
@@ -121,7 +155,7 @@ SC_MODULE(Cache) {
     }
 
 private:
-    array<array<Cacheline, CACHE_WAYS>, CACHE_SETS> m_cache;
+    array<Cacheset, CACHE_SETS> m_cache;
 
     void write_out_read(ADDRESS_UNIT data)
     {
@@ -131,7 +165,7 @@ private:
         Port_Data.write(float_64_bit_wire); // string with 64 "Z"'s
     }
 
-    void execute() 
+    void execute()
     {
         while (true) {
             wait(Port_Func.value_changed_event());
@@ -163,22 +197,28 @@ private:
             }
 
             bool found = false;
-
-            for (Cacheline& way : current_set) {
+            int way_index = 0;
+            for (Cacheline& way : current_set.lines) {
                 if (way.valid && way.tag == tag) {
                     // fast path
                     if (f == Memory::FUNC_READ) {
                         log(name(), "read hit address =", addr, "set =", index, "line =", offset);
+                        // touch line to make sure it's recently used.
+                        current_set.touch(way_index);
                         write_out_read(way.data[offset / sizeof(ADDRESS_UNIT)]);
                     }
                     if (f == Memory::FUNC_WRITE) {
                         log(name(), "write hit address =", addr, "set =", index, "line =", offset);
                         way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
+                        way.dirty = true;
+                        // Commented this to force dirty eviction for the test.
+                        /*current_set.touch(way_index);*/
                         Port_Done.write(Memory::RET_WRITE_DONE);
                     }
                     found = true;
                     break;
                 }
+                way_index++;
             }
 
             if (found)
@@ -196,11 +236,12 @@ private:
 
             bool inserted = false;
 
-            for (Cacheline& way : current_set) {
+            for (Cacheline& way : current_set.lines) {
                 if (!way.valid) {
                     way.tag = tag;
                     way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
                     way.valid = true;
+                    way.dirty = false;
                     inserted = true;
                     break;
                 }
