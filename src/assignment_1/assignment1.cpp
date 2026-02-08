@@ -211,8 +211,7 @@ private:
                         log(name(), "write hit address =", addr, "set =", index, "line =", offset);
                         way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
                         way.dirty = true;
-                        // Commented this to force dirty eviction for the test.
-                        /*current_set.touch(way_index);*/
+                        current_set.touch(way_index);
                         Port_Done.write(Memory::RET_WRITE_DONE);
                     }
                     found = true;
@@ -256,10 +255,10 @@ private:
                 {
                     ADDRESS_UNIT victim_line_addr = victim_line.tag << (INDEX_BITS + OFFSET_BITS) | (index << OFFSET_BITS);
                     log(name(), "evict dirty line address =", victim_line_addr, "set =", index, "line =", victim);
-                    // Write back deadlocks?
+                    wait();
                     Port_MemAddr.write(victim_line_addr);
-                    Port_MemFunc.write(Memory::FUNC_WRITE);
                     Port_MemData.write(victim_line.data[offset / sizeof(ADDRESS_UNIT)]);
+                    Port_MemFunc.write(Memory::FUNC_WRITE);
                     wait(Port_MemDone.value_changed_event());
                 }
                 else
