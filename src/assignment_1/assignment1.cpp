@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <iostream>
-#include <iterator>
 #include <optional>
 #include <systemc>
 #include <cmath>
@@ -101,32 +100,25 @@ struct Cacheline {
 };
 
 struct Cacheset {
-    array<Cacheline, CACHE_WAYS> lines;
-    list<int> lru {};
+    list<Cacheline> lines {};
 
     Cacheset(){
-        lru.clear();
             for(size_t way =0; way<CACHE_WAYS; ++way){
-                lines[way].valid = false;
-                lines[way].dirty = false;
-                lru.push_back(static_cast<int>(way));
+                Cacheline line{};
+                lines.push_back(line);
         }
     }
 
-    void touch(int way)
+    void touch(Cacheline& way)
     {
-        if(lru.front() == way)
+        auto iter = find_if(lines.begin(), lines.end(), [&](Cacheline& e){return &e == &way;});
+        if(iter == lines.end())
             return;
-        auto iter = find(lru.begin(), lru.end(), way);
-        if(iter == lru.end())
-            return;
-        lru.erase(iter);
-        lru.push_front(way);
+        lines.splice(lines.begin(), lines, iter);
     }
-
-    int evict()
+    Cacheline& evict()
     {
-        return lru.back();
+        return lines.back();
     }
 
 };
@@ -197,27 +189,25 @@ private:
             }
 
             bool found = false;
-            int way_index = 0;
             for (Cacheline& way : current_set.lines) {
                 if (way.valid && way.tag == tag) {
                     // fast path
                     if (f == Memory::FUNC_READ) {
                         log(name(), "read hit address =", addr, "set =", index, "line =", offset);
                         // touch line to make sure it's recently used.
-                        current_set.touch(way_index);
+                        current_set.touch(way);
                         write_out_read(way.data[offset / sizeof(ADDRESS_UNIT)]);
                     }
                     if (f == Memory::FUNC_WRITE) {
                         log(name(), "write hit address =", addr, "set =", index, "line =", offset);
                         way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
                         way.dirty = true;
-                        current_set.touch(way_index);
+                        current_set.touch(way);
                         Port_Done.write(Memory::RET_WRITE_DONE);
                     }
                     found = true;
                     break;
                 }
-                way_index++;
             }
 
             if (found)
@@ -240,7 +230,7 @@ private:
                     way.tag = tag;
                     way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
                     way.valid = true;
-                    way.dirty = false;
+                    way.dirty = (f == Memory::FUNC_WRITE) ? true:false;
                     inserted = true;
                     break;
                 }
@@ -249,12 +239,11 @@ private:
             if (!inserted) {
                 // Lack of space in the cacheset.
                 // Evict the last one.
-                int victim = current_set.evict();
-                Cacheline &victim_line = current_set.lines[victim];
+                Cacheline& victim_line = current_set.evict();
                 if (victim_line.dirty)
                 {
                     ADDRESS_UNIT victim_line_addr = victim_line.tag << (INDEX_BITS + OFFSET_BITS) | (index << OFFSET_BITS);
-                    log(name(), "evict dirty line address =", victim_line_addr, "set =", index, "line =", victim);
+                    log(name(), "evict dirty line address =", victim_line_addr, "set =", index, "line =", victim_line.tag);
                     wait();
                     Port_MemAddr.write(victim_line_addr);
                     Port_MemData.write(victim_line.data[offset / sizeof(ADDRESS_UNIT)]);
@@ -263,14 +252,14 @@ private:
                 }
                 else
                 {
-                    log(name(), "evict clean line address =", victim_line.tag, "set =", index, "line =", victim);
+                    log(name(), "evict clean line address =", victim_line.tag, "set =", index, "line =", victim_line.tag);
                 }
                 // Overwrite and put it to the front
                 victim_line.tag = tag;
                 victim_line.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
                 victim_line.valid = true;
                 victim_line.dirty = false;
-                current_set.touch(victim);
+                current_set.touch(victim_line);
             }
 
             if (f == Memory::FUNC_READ) 
