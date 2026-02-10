@@ -223,7 +223,6 @@ private:
             // Taking a slow path. Accessing memory
 
             Port_MemAddr.write(addr);
-            // NOTE: This is not entirely correct. We need to fill the whole cache line here.
             Port_MemFunc.write(Memory::FUNC_READ);
             wait(Port_MemDone.value_changed_event());
 
@@ -266,6 +265,7 @@ private:
             current_set.touch(*assign_way);
 
             log(name(), "write completed address =", addr, "set =", index, "line =", assign_way->_idx);
+
             if (f == Memory::FUNC_READ) {
                 write_out_read(result.value());
                 log(name(), "read done address =", addr);
