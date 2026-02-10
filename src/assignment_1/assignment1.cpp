@@ -192,15 +192,17 @@ private:
                     // fast path
                     current_set.touch(way);
                     if (f == Memory::FUNC_READ) {
-                        log(name(), "read hit address =", addr, "set =", index, "line =", offset);
+                        log(name(), "read hit address =", addr, "set =", index, "line =", way._idx);
                         // touch line to make sure it's recently used.
-                        write_out_read(way.data[offset / sizeof(ADDRESS_UNIT)]);
+                        write_out_read(way.data[offset]);
+                        stats_readhit(0);
                     }
                     if (f == Memory::FUNC_WRITE) {
-                        log(name(), "write hit address =", addr, "set =", index, "line =", offset);
-                        way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
+                        log(name(), "write hit address =", addr, "set =", index, "line =", way._idx);
+                        way.data[offset] = result.value();
                         way.dirty = true;
                         Port_Done.write(Memory::RET_WRITE_DONE);
+                        stats_writehit(0);
                     }
                     found = true;
                     break;
@@ -209,6 +211,14 @@ private:
 
             if (found)
                 continue;
+
+            if (f == Memory::FUNC_READ) {
+                stats_readmiss(0);
+                log(name(), "read miss address =", addr);
+            } else {
+                stats_writemiss(0);
+                log(name(), "write miss address =", addr);
+            }
 
             // Taking a slow path. Accessing memory
 
@@ -242,14 +252,14 @@ private:
                     ADDRESS_UNIT victim_line_addr = victim_line.tag << (INDEX_BITS + OFFSET_BITS) | (index << OFFSET_BITS);
                     log(name(), "evict dirty line address =", victim_line_addr, "set =", index, "line =", victim_line.tag);
                     wait();
+                ADDRESS_UNIT victim_line_addr = assign_way->tag << (INDEX_BITS + OFFSET_BITS) | (index << OFFSET_BITS);
+                    log(name(), "evict dirty line address =", victim_line_addr, "set =", index, "line =", assign_way->_idx);
                     Port_MemAddr.write(victim_line_addr);
                     Port_MemData.write(victim_line.data[offset / sizeof(ADDRESS_UNIT)]);
                     Port_MemFunc.write(Memory::FUNC_WRITE);
                     wait(Port_MemDone.value_changed_event());
-                }
-                else
-                {
-                    log(name(), "evict clean line address =", victim_line.tag, "set =", index, "line =", victim_line.tag);
+                } else {
+                    log(name(), "evict clean line address =", victim_line_addr, "set =", index, "line =", assign_way->_idx);
                 }
                 // Overwrite and put it to the front
                 victim_line.tag = tag;
@@ -260,9 +270,14 @@ private:
             }
 
             if (f == Memory::FUNC_READ) 
+            log(name(), "write completed address =", addr, "set =", index, "line =", assign_way->_idx);
+            if (f == Memory::FUNC_READ) {
                 write_out_read(result.value());
-            else
+                log(name(), "read done address =", addr);
+            } else {
                 Port_Done.write(Memory::RET_WRITE_DONE);
+                log(name(), "write done address =", addr);
+            }
         }
     }
 };
@@ -294,26 +309,13 @@ SC_MODULE(CPU) {
                 break;
             }
 
-            // To demonstrate the statistic functions, we generate a 50%
-            // probability of a 'hit' or 'miss', and call the statistic
-            // functions below
-            int j = rand() % 2;
-
             switch (tr_data.type) {
             case TraceFile::ENTRY_TYPE_READ:
                 f = Memory::FUNC_READ;
-                if (j)
-                    stats_readhit(0);
-                else
-                    stats_readmiss(0);
                 break;
 
             case TraceFile::ENTRY_TYPE_WRITE:
                 f = Memory::FUNC_WRITE;
-                if (j)
-                    stats_writehit(0);
-                else
-                    stats_writemiss(0);
                 break;
 
             case TraceFile::ENTRY_TYPE_NOP: break;
