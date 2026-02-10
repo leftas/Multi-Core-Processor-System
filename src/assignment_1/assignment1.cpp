@@ -32,6 +32,9 @@ static constexpr size_t CACHE_SETS = CACHE_SIZE / (CACHE_LINE_SIZE * CACHE_WAYS)
 static constexpr size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT));
 static constexpr size_t INDEX_BITS = std::log2(CACHE_SETS);
 
+static_assert(CACHE_SIZE % (CACHE_LINE_SIZE * CACHE_WAYS) == 0,
+              "Cache size must be a multiple of cache line size * cache ways");
+
 
 SC_MODULE(Memory) {
     public:
