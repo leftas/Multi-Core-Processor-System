@@ -196,17 +196,16 @@ private:
             for (Cacheline& way : current_set.lines) {
                 if (way.valid && way.tag == tag) {
                     // fast path
+                    current_set.touch(way);
                     if (f == Memory::FUNC_READ) {
                         log(name(), "read hit address =", addr, "set =", index, "line =", offset);
                         // touch line to make sure it's recently used.
-                        current_set.touch(way);
                         write_out_read(way.data[offset / sizeof(ADDRESS_UNIT)]);
                     }
                     if (f == Memory::FUNC_WRITE) {
                         log(name(), "write hit address =", addr, "set =", index, "line =", offset);
                         way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
                         way.dirty = true;
-                        current_set.touch(way);
                         Port_Done.write(Memory::RET_WRITE_DONE);
                     }
                     found = true;
