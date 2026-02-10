@@ -186,12 +186,6 @@ private:
 
             wait(1);
 
-            if (addr >= MEM_SIZE) {
-                if (f == Memory::FUNC_READ)
-                    write_out_read(0);
-                continue;
-            }
-
             bool found = false;
             for (Cacheline& way : current_set.lines) {
                 if (way.valid && way.tag == tag) {
