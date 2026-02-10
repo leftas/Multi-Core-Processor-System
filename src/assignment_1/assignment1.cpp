@@ -227,49 +227,44 @@ private:
             Port_MemFunc.write(Memory::FUNC_READ);
             wait(Port_MemDone.value_changed_event());
 
-            if (f == Memory::FUNC_READ)
+            if (f == Memory::FUNC_READ) 
                 result = Port_MemData.read().to_uint64();
 
-            bool inserted = false;
+            Cacheline* assign_way = nullptr;
 
             for (Cacheline& way : current_set.lines) {
                 if (!way.valid) {
-                    way.tag = tag;
-                    way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
-                    way.valid = true;
-                    way.dirty = (f == Memory::FUNC_WRITE) ? true:false;
-                    inserted = true;
+                    assign_way = &way;
                     break;
                 }
             }
 
-            if (!inserted) {
+            if (assign_way == nullptr) {
                 // Lack of space in the cacheset.
                 // Evict the last one.
-                Cacheline& victim_line = current_set.evict();
-                if (victim_line.dirty)
-                {
-                    ADDRESS_UNIT victim_line_addr = victim_line.tag << (INDEX_BITS + OFFSET_BITS) | (index << OFFSET_BITS);
-                    log(name(), "evict dirty line address =", victim_line_addr, "set =", index, "line =", victim_line.tag);
-                    wait();
+                assign_way = &current_set.evict();
+
                 ADDRESS_UNIT victim_line_addr = assign_way->tag << (INDEX_BITS + OFFSET_BITS) | (index << OFFSET_BITS);
+                if (assign_way->dirty) {
                     log(name(), "evict dirty line address =", victim_line_addr, "set =", index, "line =", assign_way->_idx);
                     Port_MemAddr.write(victim_line_addr);
-                    Port_MemData.write(victim_line.data[offset / sizeof(ADDRESS_UNIT)]);
+                    Port_MemData.write(assign_way->data[offset]);
                     Port_MemFunc.write(Memory::FUNC_WRITE);
                     wait(Port_MemDone.value_changed_event());
+                    Port_MemData.write(float_64_bit_wire);
                 } else {
                     log(name(), "evict clean line address =", victim_line_addr, "set =", index, "line =", assign_way->_idx);
                 }
-                // Overwrite and put it to the front
-                victim_line.tag = tag;
-                victim_line.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
-                victim_line.valid = true;
-                victim_line.dirty = false;
-                current_set.touch(victim_line);
+
             }
 
-            if (f == Memory::FUNC_READ) 
+            // Overwrite and put it to the front
+            assign_way->tag = tag;
+            assign_way->data[offset] = result.value();
+            assign_way->valid = true;
+            assign_way->dirty = false;
+            current_set.touch(*assign_way);
+
             log(name(), "write completed address =", addr, "set =", index, "line =", assign_way->_idx);
             if (f == Memory::FUNC_READ) {
                 write_out_read(result.value());
