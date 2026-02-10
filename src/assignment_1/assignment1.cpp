@@ -96,6 +96,7 @@ SC_MODULE(Memory) {
 };
 
 struct Cacheline {
+    size_t _idx;
     size_t tag = 0;
     bool valid = false;
     bool dirty = false;
@@ -106,9 +107,9 @@ struct Cacheset {
     list<Cacheline> lines {};
 
     Cacheset(){
-            for(size_t way =0; way<CACHE_WAYS; ++way){
-                Cacheline line{};
-                lines.push_back(line);
+        for(size_t way =0; way<CACHE_WAYS; ++way){
+            Cacheline line{._idx = way};
+            lines.emplace_back(line);
         }
     }
 
