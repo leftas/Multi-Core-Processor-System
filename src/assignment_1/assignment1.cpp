@@ -29,7 +29,7 @@ static constexpr size_t CACHE_LINE_SIZE = 32;
 static constexpr size_t CACHE_WAYS = 8;
 static constexpr size_t CACHE_SETS = CACHE_SIZE / (CACHE_LINE_SIZE * CACHE_WAYS);
 
-static constexpr size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)); // 2
+static constexpr size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)); // 5
 static constexpr size_t INDEX_BITS = std::log2(CACHE_SETS); // 7
 
 static_assert(CACHE_SIZE % (CACHE_LINE_SIZE * CACHE_WAYS) == 0,
@@ -108,7 +108,7 @@ struct Cacheset {
 
     Cacheset(){
         for(size_t way =0; way<CACHE_WAYS; ++way){
-            Cacheline line{._idx = way};
+            Cacheline line{way};
             lines.emplace_back(line);
         }
     }
@@ -263,7 +263,7 @@ private:
             assign_way->tag = tag;
             assign_way->data[offset] = result.value();
             assign_way->valid = true;
-            assign_way->dirty = false;
+            assign_way->dirty = (f == Memory::FUNC_WRITE);
             current_set.touch(*assign_way);
 
             log(name(), "write completed address =", addr, "set =", index, "line =", assign_way->_idx);
