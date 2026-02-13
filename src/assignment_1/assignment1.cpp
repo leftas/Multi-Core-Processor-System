@@ -24,10 +24,11 @@ using namespace sc_core; // This pollutes namespace, better: only import what yo
 using ADDRESS_UNIT = uint8_t;
 
 static constexpr size_t MEM_SIZE = 8912;
-static constexpr size_t CACHE_SIZE = 32 * 1024;
+static constexpr size_t CACHE_SETS = 128;
 static constexpr size_t CACHE_LINE_SIZE = 32;
 static constexpr size_t CACHE_WAYS = 8;
-static constexpr size_t CACHE_SETS = CACHE_SIZE / (CACHE_LINE_SIZE * CACHE_WAYS);
+
+static constexpr size_t CACHE_SIZE = CACHE_SETS * CACHE_WAYS * CACHE_LINE_SIZE;
 
 static constexpr size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)); // 5
 static constexpr size_t INDEX_BITS = std::log2(CACHE_SETS); // 7
@@ -100,7 +101,7 @@ struct Cacheline {
     size_t tag = 0;
     bool valid = false;
     bool dirty = false;
-    array<ADDRESS_UNIT, CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)> data {};
+    array<uint32_t, CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)> data {};
 };
 
 struct Cacheset {
