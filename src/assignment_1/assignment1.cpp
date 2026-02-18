@@ -18,6 +18,7 @@
 #include <array>
 #include <list>
 #include "psa.h"
+#include "sysc/communication/sc_signal_rv_ports.h"
 
 using namespace std;
 using namespace sc_core; // This pollutes namespace, better: only import what you need.
@@ -96,6 +97,33 @@ SC_MODULE(Memory) {
     }
 };
 
+SC_MODULE(Bus) {
+public :
+    sc_in<bool> Port_CLK;
+    sc_inout_rv<64> Port_BusAddr;
+    sc_inout_rv<2> Port_BusFunc;
+    sc_inout_rv<1> Port_BusDone;
+    sc_inout_rv<sizeof(ADDRESS_UNIT)*32> Port_BusData;
+    sc_out<Memory::Function> Port_MemFunc;
+    sc_in<Memory::RetCode> Port_MemDone;
+    sc_out<uint64_t> Port_MemAddr;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 32> Port_MemData;
+public :
+    SC_CTOR ( Bus )
+    {
+    }
+    virtual bool read(uint64_t addr)
+    {
+        Port_BusAddr.write(addr);
+        return true;
+    };
+    virtual bool write (uint64_t addr, uint64_t data)
+    {
+        Port_BusAddr.write(addr);
+        return true;
+    }
+};
+
 struct Cacheline {
     size_t _idx;
     size_t tag = 0;
@@ -128,7 +156,7 @@ struct Cacheset {
 
 };
 
-SC_MODULE(Cache) {
+class Cache: public sc_module {
     public:
     sc_in<bool> Port_CLK;
 
@@ -138,20 +166,22 @@ SC_MODULE(Cache) {
     sc_in<uint64_t> Port_Addr;
     sc_inout_rv<sizeof(ADDRESS_UNIT) * 32> Port_Data;
 
-    sc_out<Memory::Function> Port_MemFunc;
-    sc_in<Memory::RetCode> Port_MemDone;
+    sc_inout_rv<2> Port_MemFunc;
+    sc_inout_rv<1> Port_MemDone;
 
-    sc_out<uint64_t> Port_MemAddr;
+    sc_inout_rv<64> Port_MemAddr;
     sc_inout_rv<sizeof(ADDRESS_UNIT) * 32> Port_MemData;
 
-    SC_CTOR(Cache) {
+   Cache(sc_module_name name_, int id_): sc_module(name_), id(id_) {
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
+        log(name(), "constructed with id", id);
         dont_initialize();
 
     }
 
 private:
+    int id;
     array<Cacheset, CACHE_SETS> m_cache;
 
     void write_out_read(ADDRESS_UNIT data)
@@ -249,8 +279,7 @@ private:
                     log(name(), "evict dirty line address =", victim_line_addr, "set =", index, "line =", assign_way->_idx);
                     Port_MemAddr.write(victim_line_addr);
                     Port_MemData.write(assign_way->data[offset]);
-                    wait(); // HACK: Find out the reason why this happens.
-                            // Some sort of race condition, just the question is why.
+                    wait();
                     Port_MemFunc.write(Memory::FUNC_WRITE);
                     wait(Port_MemDone.value_changed_event());
                     Port_MemData.write(float_64_bit_wire);
@@ -280,7 +309,7 @@ private:
     }
 };
 
-SC_MODULE(CPU) {
+class CPU : public sc_module{
     public:
     sc_in<bool> Port_CLK;
     sc_in<Memory::RetCode> Port_MemDone;
@@ -288,13 +317,15 @@ SC_MODULE(CPU) {
     sc_out<uint64_t> Port_MemAddr;
     sc_inout_rv<sizeof(ADDRESS_UNIT) * 32> Port_MemData;
 
-    SC_CTOR(CPU) {
+    CPU(sc_module_name name_, int id_): sc_module(name_), id(id_) {
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
+        log(name(), "constructed with id", id);
         dont_initialize();
     }
 
     private:
+    int id;
     void execute() {
         TraceFile::Entry tr_data;
         Memory::Function f;
@@ -371,53 +402,86 @@ int sc_main(int argc, char *argv[]) {
         // This function sets tracefile_ptr and num_cpus
         init_tracefile(&argc, &argv);
 
+        // init_tracefile changed argc and argv so we cannot use
+        // getopt anymore. "-q" must be specified after the tracefile.
+        if (argc == 2 && !strcmp(argv[0], "-q")) {
+            sc_report_handler::set_verbosity_level(SC_LOW);
+        }
+
         // Initialize statistics counters
         stats_init();
 
+        // The clock that will drive the CPU and Memory
+        sc_clock clk;
         // Instantiate Modules
         Memory mem("memory");
-        CPU cpu("cpu");
-        Cache cache("cache");
+        Bus bus("bus");
+        vector<CPU*> cpus(num_cpus);
+        vector<Cache*> caches(num_cpus);
 
         // Signals
         sc_buffer<Memory::Function> sigMemFunc;
         sc_buffer<Memory::RetCode> sigMemDone;
         sc_signal<uint64_t> sigMemAddr;
         sc_signal_rv<sizeof(ADDRESS_UNIT) * 32> sigMemData;
+        sc_signal_rv<64> sigBusAddr;
+        sc_signal_rv<sizeof(ADDRESS_UNIT)*32> sigBusData;
+        sc_signal_rv<2> sigBusFunc;
+        sc_signal_rv<1> sigBusDone;
 
-        sc_buffer<Memory::Function> sigCacheFunc;
-        sc_buffer<Memory::RetCode> sigCacheDone;
-        sc_signal<uint64_t> sigCacheAddr;
-        sc_signal_rv<sizeof(ADDRESS_UNIT) * 32> sigCacheData;
+        bus.Port_MemFunc(sigMemFunc);
+        bus.Port_MemDone(sigMemDone);
+        bus.Port_MemAddr(sigMemAddr);
+        bus.Port_MemData(sigMemData);
 
-        // The clock that will drive the CPU and Memory
-        sc_clock clk;
+        bus.Port_BusAddr(sigBusAddr);
+        bus.Port_BusData(sigBusData);
+        bus.Port_BusFunc(sigBusFunc);
+        bus.Port_BusDone(sigBusDone);
 
-        // Connecting module ports with signals
+        mem.Port_Func(sigMemFunc);
+        mem.Port_Done(sigMemDone);
+        mem.Port_Addr(sigMemAddr);
+        mem.Port_Data(sigMemData);
 
-        cache.Port_MemFunc(sigCacheFunc);
-        cache.Port_MemAddr(sigCacheAddr);
-        cache.Port_MemData(sigCacheData);
-        cache.Port_MemDone(sigCacheDone);
-
-        mem.Port_Func(sigCacheFunc);
-        mem.Port_Addr(sigCacheAddr);
-        mem.Port_Data(sigCacheData);
-        mem.Port_Done(sigCacheDone);
-
-        cache.Port_Func(sigMemFunc);
-        cache.Port_Addr(sigMemAddr);
-        cache.Port_Data(sigMemData);
-        cache.Port_Done(sigMemDone);
-
-        cpu.Port_MemFunc(sigMemFunc);
-        cpu.Port_MemAddr(sigMemAddr);
-        cpu.Port_MemData(sigMemData);
-        cpu.Port_MemDone(sigMemDone);
-
+        bus.Port_CLK(clk);
         mem.Port_CLK(clk);
-        cpu.Port_CLK(clk);
-        cache.Port_CLK(clk);
+
+        vector<sc_buffer<Memory::Function>*> cpu_funcs(num_cpus);
+        vector<sc_buffer<Memory::RetCode>*>  cpu_dones(num_cpus);
+        vector<sc_signal<uint64_t>*>         cpu_addrs(num_cpus);
+        vector<sc_signal_rv<sizeof(ADDRESS_UNIT) * 32>*> cpu_datas(num_cpus);
+
+        for (uint32_t i = 0; i < num_cpus; ++i) {
+            string cpu_name = "cpu_" + to_string(i);
+            string cache_name = "cache_" + to_string(i);
+
+            cpus[i] = new CPU(cpu_name.c_str(), i);
+            caches[i] = new Cache(cache_name.c_str(), i);
+
+            cpu_funcs[i] = new sc_buffer<Memory::Function>();
+            cpu_dones[i] = new sc_buffer<Memory::RetCode>();
+            cpu_addrs[i] = new sc_signal<uint64_t>();
+            cpu_datas[i] = new sc_signal_rv<sizeof(ADDRESS_UNIT) * 32>();
+
+            // Connect CPU <-> Cache
+            cpus[i]->Port_MemFunc(*cpu_funcs[i]);
+            cpus[i]->Port_MemDone(*cpu_dones[i]);
+            cpus[i]->Port_MemAddr(*cpu_addrs[i]);
+            cpus[i]->Port_MemData(*cpu_datas[i]);
+            cpus[i]->Port_CLK(clk);
+
+            caches[i]->Port_Func(*cpu_funcs[i]);
+            caches[i]->Port_Done(*cpu_dones[i]);
+            caches[i]->Port_Addr(*cpu_addrs[i]);
+            caches[i]->Port_Data(*cpu_datas[i]);
+
+            caches[i]->Port_MemAddr(sigBusAddr); 
+            caches[i]->Port_MemData(sigBusData);
+            caches[i]->Port_MemFunc(sigBusFunc);
+            caches[i]->Port_MemDone(sigBusDone);
+            caches[i]->Port_CLK(clk);
+            }
 
         cout << "Running (press CTRL+C to interrupt)... " << endl;
 
