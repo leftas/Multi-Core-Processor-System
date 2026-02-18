@@ -10,26 +10,31 @@
  *
  */
 
+#include <algorithm>
 #include <iostream>
 #include <optional>
 #include <systemc>
 #include <cmath>
 #include <array>
-
+#include <list>
 #include "psa.h"
 
 using namespace std;
 using namespace sc_core; // This pollutes namespace, better: only import what you need.
-using ADDRESS_UNIT = uint64_t;
+using ADDRESS_UNIT = uint8_t;
 
-static constexpr size_t MEM_SIZE = 2500;
-static constexpr size_t CACHE_SIZE = 32 * 1024;
+static constexpr size_t MEM_SIZE = 8912;
+static constexpr size_t CACHE_SETS = 128;
 static constexpr size_t CACHE_LINE_SIZE = 32;
 static constexpr size_t CACHE_WAYS = 8;
-static constexpr size_t CACHE_SETS = CACHE_SIZE / (CACHE_LINE_SIZE * CACHE_WAYS);
 
-static constexpr size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT));
-static constexpr size_t INDEX_BITS = std::log2(CACHE_SETS);
+static constexpr size_t CACHE_SIZE = CACHE_SETS * CACHE_WAYS * CACHE_LINE_SIZE;
+
+static constexpr size_t OFFSET_BITS = std::log2(CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)); // 5
+static constexpr size_t INDEX_BITS = std::log2(CACHE_SETS); // 7
+
+static_assert(CACHE_SIZE % (CACHE_LINE_SIZE * CACHE_WAYS) == 0,
+              "Cache size must be a multiple of cache line size * cache ways");
 
 
 SC_MODULE(Memory) {
@@ -40,9 +45,9 @@ SC_MODULE(Memory) {
 
     sc_in<bool> Port_CLK;
     sc_in<Function> Port_Func;
-    sc_in<ADDRESS_UNIT> Port_Addr;
+    sc_in<uint64_t> Port_Addr;
     sc_out<RetCode> Port_Done;
-    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_Data;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 32> Port_Data;
 
     SC_CTOR(Memory) {
         SC_THREAD(execute);
@@ -64,10 +69,10 @@ SC_MODULE(Memory) {
             wait(Port_Func.value_changed_event());
 
             Function f = Port_Func.read();
-            ADDRESS_UNIT addr = Port_Addr.read();
-            ADDRESS_UNIT data = 0;
+            uint64_t addr = Port_Addr.read();
+            uint32_t data = 0;
             if (f == FUNC_WRITE) {
-                data = Port_Data.read().to_uint64();
+                data = Port_Data.read().to_uint();
                 log(name(), "received write on address", addr, "with data", data);
             } else {
                 log(name(), "received read on address", addr);
@@ -92,9 +97,35 @@ SC_MODULE(Memory) {
 };
 
 struct Cacheline {
+    size_t _idx;
     size_t tag = 0;
     bool valid = false;
-    array<ADDRESS_UNIT, CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)> data {};
+    bool dirty = false;
+    array<uint32_t, CACHE_LINE_SIZE / sizeof(ADDRESS_UNIT)> data {};
+};
+
+struct Cacheset {
+    list<Cacheline> lines {};
+
+    Cacheset(){
+        for(size_t way =0; way<CACHE_WAYS; ++way){
+            Cacheline line{way};
+            lines.emplace_back(line);
+        }
+    }
+
+    void touch(Cacheline& way)
+    {
+        auto iter = find_if(lines.begin(), lines.end(), [&](Cacheline& e){return &e == &way;});
+        if(iter == lines.end())
+            return;
+        lines.splice(lines.begin(), lines, iter);
+    }
+    Cacheline& evict()
+    {
+        return lines.back();
+    }
+
 };
 
 SC_MODULE(Cache) {
@@ -104,14 +135,14 @@ SC_MODULE(Cache) {
     sc_in<Memory::Function> Port_Func;
     sc_out<Memory::RetCode> Port_Done;
 
-    sc_in<ADDRESS_UNIT> Port_Addr;
-    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_Data;
+    sc_in<uint64_t> Port_Addr;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 32> Port_Data;
 
     sc_out<Memory::Function> Port_MemFunc;
     sc_in<Memory::RetCode> Port_MemDone;
 
-    sc_out<ADDRESS_UNIT> Port_MemAddr;
-    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_MemData;
+    sc_out<uint64_t> Port_MemAddr;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 32> Port_MemData;
 
     SC_CTOR(Cache) {
         SC_THREAD(execute);
@@ -121,7 +152,7 @@ SC_MODULE(Cache) {
     }
 
 private:
-    array<array<Cacheline, CACHE_WAYS>, CACHE_SETS> m_cache;
+    array<Cacheset, CACHE_SETS> m_cache;
 
     void write_out_read(ADDRESS_UNIT data)
     {
@@ -131,17 +162,17 @@ private:
         Port_Data.write(float_64_bit_wire); // string with 64 "Z"'s
     }
 
-    void execute() 
+    void execute()
     {
         while (true) {
             wait(Port_Func.value_changed_event());
 
             Memory::Function f = Port_Func.read();
-            ADDRESS_UNIT addr = Port_Addr.read();
-            std::optional<ADDRESS_UNIT> result; // result will be gone if we not gonna take it instantly.
+            uint64_t addr = Port_Addr.read();
+            std::optional<uint32_t> result; // result will be gone if we not gonna take it instantly.
 
             if (f == Memory::FUNC_WRITE)
-                result = Port_Data.read().to_uint64();
+                result = Port_Data.read().to_uint();
 
             size_t offset = addr & ((1 << OFFSET_BITS) - 1); // offset bitmask -> indicates which offset in cacheline we select.
             size_t index  = (addr >> OFFSET_BITS) & ((1 << INDEX_BITS) - 1); // index bitmask -> indicates which cache set we select.
@@ -156,25 +187,23 @@ private:
 
             wait(1);
 
-            if (addr >= MEM_SIZE) {
-                if (f == Memory::FUNC_READ)
-                    write_out_read(0);
-                continue;
-            }
-
             bool found = false;
-
-            for (Cacheline& way : current_set) {
+            for (Cacheline& way : current_set.lines) {
                 if (way.valid && way.tag == tag) {
                     // fast path
+                    current_set.touch(way);
                     if (f == Memory::FUNC_READ) {
-                        log(name(), "read hit address =", addr, "set =", index, "line =", offset);
-                        write_out_read(way.data[offset / sizeof(ADDRESS_UNIT)]);
+                        log(name(), "read hit address =", addr, "set =", index, "line =", way._idx);
+                        // touch line to make sure it's recently used.
+                        write_out_read(way.data[offset]);
+                        stats_readhit(0);
                     }
                     if (f == Memory::FUNC_WRITE) {
-                        log(name(), "write hit address =", addr, "set =", index, "line =", offset);
-                        way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
+                        log(name(), "write hit address =", addr, "set =", index, "line =", way._idx);
+                        way.data[offset] = result.value();
+                        way.dirty = true;
                         Port_Done.write(Memory::RET_WRITE_DONE);
+                        stats_writehit(0);
                     }
                     found = true;
                     break;
@@ -184,37 +213,69 @@ private:
             if (found)
                 continue;
 
+            if (f == Memory::FUNC_READ) {
+                stats_readmiss(0);
+                log(name(), "read miss address =", addr);
+            } else {
+                stats_writemiss(0);
+                log(name(), "write miss address =", addr);
+            }
+
             // Taking a slow path. Accessing memory
 
             Port_MemAddr.write(addr);
-            // NOTE: This is not entirely correct. We need to fill the whole cache line here.
             Port_MemFunc.write(Memory::FUNC_READ);
             wait(Port_MemDone.value_changed_event());
 
-            if (f == Memory::FUNC_READ)
-                result = Port_MemData.read().to_uint64();
+            if (f == Memory::FUNC_READ) 
+                result = Port_MemData.read().to_uint();
 
-            bool inserted = false;
+            Cacheline* assign_way = nullptr;
 
-            for (Cacheline& way : current_set) {
+            for (Cacheline& way : current_set.lines) {
                 if (!way.valid) {
-                    way.tag = tag;
-                    way.data[offset / sizeof(ADDRESS_UNIT)] = result.value();
-                    way.valid = true;
-                    inserted = true;
+                    assign_way = &way;
                     break;
                 }
             }
 
-            if (!inserted) {
+            if (assign_way == nullptr) {
                 // Lack of space in the cacheset.
-                // TODO: LRU :)
+                // Evict the last one.
+                assign_way = &current_set.evict();
+
+                uint64_t victim_line_addr = assign_way->tag << (INDEX_BITS + OFFSET_BITS) | (index << OFFSET_BITS);
+                if (assign_way->dirty) {
+                    log(name(), "evict dirty line address =", victim_line_addr, "set =", index, "line =", assign_way->_idx);
+                    Port_MemAddr.write(victim_line_addr);
+                    Port_MemData.write(assign_way->data[offset]);
+                    wait(); // HACK: Find out the reason why this happens.
+                            // Some sort of race condition, just the question is why.
+                    Port_MemFunc.write(Memory::FUNC_WRITE);
+                    wait(Port_MemDone.value_changed_event());
+                    Port_MemData.write(float_64_bit_wire);
+                } else {
+                    log(name(), "evict clean line address =", victim_line_addr, "set =", index, "line =", assign_way->_idx);
+                }
+
             }
 
-            if (f == Memory::FUNC_READ) 
+            // Overwrite and put it to the front
+            assign_way->tag = tag;
+            assign_way->data[offset] = result.value();
+            assign_way->valid = true;
+            assign_way->dirty = (f == Memory::FUNC_WRITE);
+            current_set.touch(*assign_way);
+
+            log(name(), "write completed address =", addr, "set =", index, "line =", assign_way->_idx);
+
+            if (f == Memory::FUNC_READ) {
                 write_out_read(result.value());
-            else
+                log(name(), "read done address =", addr);
+            } else {
                 Port_Done.write(Memory::RET_WRITE_DONE);
+                log(name(), "write done address =", addr);
+            }
         }
     }
 };
@@ -224,8 +285,8 @@ SC_MODULE(CPU) {
     sc_in<bool> Port_CLK;
     sc_in<Memory::RetCode> Port_MemDone;
     sc_out<Memory::Function> Port_MemFunc;
-    sc_out<ADDRESS_UNIT> Port_MemAddr;
-    sc_inout_rv<sizeof(ADDRESS_UNIT) * 8> Port_MemData;
+    sc_out<uint64_t> Port_MemAddr;
+    sc_inout_rv<sizeof(ADDRESS_UNIT) * 32> Port_MemData;
 
     SC_CTOR(CPU) {
         SC_THREAD(execute);
@@ -246,26 +307,13 @@ SC_MODULE(CPU) {
                 break;
             }
 
-            // To demonstrate the statistic functions, we generate a 50%
-            // probability of a 'hit' or 'miss', and call the statistic
-            // functions below
-            int j = rand() % 2;
-
             switch (tr_data.type) {
             case TraceFile::ENTRY_TYPE_READ:
                 f = Memory::FUNC_READ;
-                if (j)
-                    stats_readhit(0);
-                else
-                    stats_readmiss(0);
                 break;
 
             case TraceFile::ENTRY_TYPE_WRITE:
                 f = Memory::FUNC_WRITE;
-                if (j)
-                    stats_writehit(0);
-                else
-                    stats_writemiss(0);
                 break;
 
             case TraceFile::ENTRY_TYPE_NOP: break;
@@ -296,7 +344,7 @@ SC_MODULE(CPU) {
                 wait(Port_MemDone.value_changed_event());
 
                 if (f == Memory::FUNC_READ) {
-                    log(name(), "read data", Port_MemData.read().to_uint64(),
+                    log(name(), "read data", Port_MemData.read().to_uint(),
                             "from address", tr_data.addr);
                 }
             } else {
@@ -334,13 +382,13 @@ int sc_main(int argc, char *argv[]) {
         // Signals
         sc_buffer<Memory::Function> sigMemFunc;
         sc_buffer<Memory::RetCode> sigMemDone;
-        sc_signal<ADDRESS_UNIT> sigMemAddr;
-        sc_signal_rv<sizeof(ADDRESS_UNIT) * 8> sigMemData;
+        sc_signal<uint64_t> sigMemAddr;
+        sc_signal_rv<sizeof(ADDRESS_UNIT) * 32> sigMemData;
 
         sc_buffer<Memory::Function> sigCacheFunc;
         sc_buffer<Memory::RetCode> sigCacheDone;
-        sc_signal<ADDRESS_UNIT> sigCacheAddr;
-        sc_signal_rv<sizeof(ADDRESS_UNIT) * 8> sigCacheData;
+        sc_signal<uint64_t> sigCacheAddr;
+        sc_signal_rv<sizeof(ADDRESS_UNIT) * 32> sigCacheData;
 
         // The clock that will drive the CPU and Memory
         sc_clock clk;
